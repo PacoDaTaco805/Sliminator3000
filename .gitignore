@@ -1,3 +1,6 @@
+# ignoring twitch config file
+twitchApiClientConfig.json
+
 # config file for bot
 config.json
 
