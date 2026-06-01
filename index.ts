@@ -1,10 +1,19 @@
 import { Client, Events, GatewayIntentBits } from "discord.js";
-import { token } from "./config.json";
+import { token, membersToCheck, intervalMs } from "./config.json";
+import { ChannelTracker } from "./ChannelTracker";
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates],
+});
+
+const channelTracker = new ChannelTracker(client, membersToCheck, intervalMs);
 
 client.once(Events.ClientReady, (readyClient) => {
-  console.log(`Ready! Logged in as ${readyClient.user.tag}`);
+  console.log(`[-] Bot is ready. Logged in as ${readyClient.user.tag}`);
+});
+
+client.on(Events.VoiceStateUpdate, (oldState, newState) => {
+  channelTracker.handleVoiceStateUpdateEvent({ oldState, newState });
 });
 
 client.login(token);

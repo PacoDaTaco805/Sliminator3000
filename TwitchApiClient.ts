@@ -20,7 +20,7 @@ type StreamResponse = {
  * Provides a simple API for checking if a twitch streamer is live.
  */
 export class TwitchApiClient {
-  twitchToken: TwitchToken | null = null;
+  private twitchToken: TwitchToken | null = null;
 
   /**
    * Initializes this Twitch Connector which simply means getting an access token.
