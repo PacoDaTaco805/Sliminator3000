@@ -182,9 +182,6 @@ export class ChannelTracker {
 
     console.log(`[-] Member performed [${memberAction}] action`);
 
-    console.log("[-] Stopping live status checker...");
-    this.stopLiveStatusChecker();
-
     switch (memberAction) {
       case MemberAction.JOINED_CHANNEL:
         this.handleJoinedChannelAction(event, memberId);
@@ -202,7 +199,7 @@ export class ChannelTracker {
         console.log(
           `[-] Action [${memberAction}] does not merit updating channel cache. Skipping...`,
         );
-        return;
+        break;
     }
 
     this.updateLiveStatusChecker();
