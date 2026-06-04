@@ -1,4 +1,4 @@
-import { clientId, clientSecret } from "./twitchApiClientConfig.json";
+import { clientId, clientSecret } from "../twitchApiClientConfig.json";
 
 type TwitchToken = {
   access_token: string;

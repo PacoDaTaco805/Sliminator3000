@@ -1,5 +1,5 @@
 import { type Client, type VoiceBasedChannel } from "discord.js";
-import type { VoiceState } from "discord.js";
+import { VoiceState } from "discord.js";
 import { TwitchApiClient } from "./TwitchApiClient";
 
 type MemberInfo = {
@@ -12,7 +12,7 @@ type VoiceStateUpdateEvent = {
   newState: VoiceState;
 };
 
-type TacoChannel = {
+type ChannelInfo = {
   channel: VoiceBasedChannel;
   currentStatus: string;
   discordUserIds: string[];
@@ -29,16 +29,50 @@ enum MemberAction {
  * streaming on twitch and marks their channel status accordingly.
  */
 export class ChannelTracker {
+  /**
+   * The status to use for a channel that has a streamer
+   * who is live.
+   */
   private LIVE_STATUS = "🔴 Live";
+
+  /**
+   * The channel status to when no one is live in the channel.
+   */
   private NOT_LIVE_STATUS = "";
 
+  /**
+   * Holds the {@link MemberInfo} for all streamers to
+   * check the live status of.
+   */
   memberInfo: MemberInfo[];
+
+  /**
+   * The discord bot client that is using this {@link ChannelTracker}.
+   */
   client: Client;
+
+  /**
+   * An instance of {@link TwitchApiClient} that is used to ping twitch
+   * for the live status of a streamer.
+   */
   twitchConnector: TwitchApiClient;
+
+  /**
+   * The time interval in ms at which we check if a streamer in a channel
+   * is live.
+   */
   liveStatusCheckingInterval: number;
+
+  /**
+   * Holds the {@link NodeJS.Timeout} that triggers checking the live status
+   * of all streamers in a channel.
+   */
   liveStatusChecker: NodeJS.Timeout | undefined;
 
-  channels = new Map<string, TacoChannel>();
+  /**
+   * A cache for holding information regarding which which channels contain streamers.
+   */
+  channels = new Map<string, ChannelInfo>();
 
   /**
    * Constructs an instance of {@link ChannelTracker}.
@@ -59,21 +93,19 @@ export class ChannelTracker {
     this.liveStatusCheckingInterval = liveStatusCheckingInterval;
 
     this.twitchConnector.initialize();
-
-    this.initialize();
-
-    this.startLiveStatusChecker();
   }
 
   /**
    * Used for when the bot first starts and there could
    * be users already in channels that are live. This
-   * will iterate through all guild, all channels of
-   * those guild, all users in those channels of those
-   * guilds that are live, and add them to teh cache and
+   * will iterate through all guilds, all channels of
+   * those guilds, all users in those channels of those
+   * guilds that are live, and add them to the cache and
    * update the channel statuses accordingly.
    */
-  private initialize() {
+  public initialize() {
+    console.log("[-] Initializing channel tracker...");
+
     const guilds = this.client.guilds.cache;
 
     guilds.forEach((guild) =>
@@ -81,12 +113,18 @@ export class ChannelTracker {
         .filter((channel) => channel.isVoiceBased())
         .forEach((voiceBasedChannel) =>
           voiceBasedChannel.members
-            .filter((member) => this.isLive(member.id))
+            .filter((member) => this.isStreamer(member.id))
             .forEach((liveMember) =>
               this.addMemberToChannel(voiceBasedChannel, liveMember.id),
             ),
         ),
     );
+
+    console.log("[-] Finished initializing channel tracker...");
+
+    this.printChannelCache();
+
+    this.updateLiveStatusChecker();
   }
 
   /**
@@ -111,7 +149,8 @@ export class ChannelTracker {
   }
 
   /**
-   * Updates teh cache to reflect any changes in members joining, switching, or leaving voice channels. This will also restart the {@link liveStatusChecker}.
+   * Updates the cache to reflect any changes in members joining, switching,
+   * or leaving voice channels. This will also restart the {@link liveStatusChecker}.
    * @param event
    * @returns
    */
@@ -129,11 +168,15 @@ export class ChannelTracker {
       return;
     }
 
+    const memberId = newState.member.id;
+
     // Is the member a streamer?
-    if (!this.isStreamer(newState.member.id)) {
-      console.log("[-] Member is not a streamer. Skipping...");
+    if (!this.isStreamer(memberId)) {
+      console.log(`[-] [${memberId}] is not a streamer. Skipping...`);
       return;
     }
+
+    console.log(`[-] [${memberId}] is a streamer. Processing action...`);
 
     const memberAction = this.getMemberAction(event);
 
@@ -144,45 +187,98 @@ export class ChannelTracker {
 
     switch (memberAction) {
       case MemberAction.JOINED_CHANNEL:
-        if (!newState.channel) {
-          console.log("[-] Missing new state channel. Skipping...");
-          return;
-        }
-
-        this.addMemberToChannel(newState.channel, newState.member.id);
-
+        this.handleJoinedChannelAction(event, memberId);
         break;
 
       case MemberAction.SWITCHED_CHANNELS:
-        if (!oldState.channel || !newState.channel) {
-          console.log("[-] Missing old or new state channel. Skipping...");
-          return;
-        }
-
-        this.switchMemberToChannel(
-          oldState.channel,
-          newState.channel,
-          newState.member.id,
-        );
-
+        this.handleSwitchedChannelsAction(event, memberId);
         break;
-
-      case MemberAction.REMAINED_IN_CHANNEL:
-        console.log("[-] Member stayed in same channel. No work to do...");
-        return;
 
       case MemberAction.LEFT_CHANNEL:
-        if (!oldState.channel) {
-          console.log("[-] Missing old state channel. Skipping...");
-          return;
-        }
-
-        this.removeMemberFromChannel(oldState.channel, oldState.member.id);
-
+        this.handleLeftChannelAction(event, memberId);
         break;
+
+      default:
+        console.log(
+          `[-] Action [${memberAction}] does not merit updating channel cache. Skipping...`,
+        );
+        return;
     }
 
-    this.startLiveStatusChecker();
+    this.updateLiveStatusChecker();
+  }
+
+  /**
+   * Handles the {@link JOINED_CHANNEL} action performed by the given user.
+   * @param event The {@link VoiceStateUpdateEvent} for this {@link JOINED_CHANNEL} action.
+   * @param memberId The member who performed {@link JOINED_CHANNEL}.
+   */
+  private handleJoinedChannelAction(
+    event: VoiceStateUpdateEvent,
+    memberId: string,
+  ) {
+    if (!event.newState.channel) {
+      console.log("[-] Missing new state channel. Skipping...");
+    } else {
+      this.addMemberToChannel(event.newState.channel, memberId);
+    }
+  }
+
+  /**
+   * Handles the {@link SWITCHED_CHANNELS} action performed by the given user.
+   * @param event The {@link VoiceStateUpdateEvent} for this {@link SWITCHED_CHANNELS} action.
+   * @param memberId The member who performed {@link SWITCHED_CHANNELS}.
+   */
+  private handleSwitchedChannelsAction(
+    event: VoiceStateUpdateEvent,
+    memberId: string,
+  ) {
+    const newState = event.newState;
+    const oldState = event.oldState;
+
+    if (!oldState.channel || !newState.channel) {
+      console.log("[-] Missing old or new state channel. Skipping...");
+    } else {
+      this.switchMemberToChannel(oldState.channel, newState.channel, memberId);
+    }
+  }
+
+  /**
+   * Handles the {@link LEFT_CHANNEL} action performed by the given user.
+   * @param event The {@link VoiceStateUpdateEvent} for this {@link LEFT_CHANNEL} action.
+   * @param memberId The member who performed {@link LEFT_CHANNEL}.
+   */
+  private handleLeftChannelAction(
+    event: VoiceStateUpdateEvent,
+    memberId: string,
+  ) {
+    if (!event.oldState.channel) {
+      console.log("[-] Missing old state channel. Skipping...");
+    } else {
+      this.removeMemberFromChannel(event.oldState.channel, memberId);
+    }
+  }
+
+  /**
+   * Checks if the {@link liveStatusChecker} should be running or not.
+   */
+  private updateLiveStatusChecker() {
+    if (this.streamerIsPresent()) {
+      if (this.liveStatusChecker == undefined) {
+        console.log("[-] Starting live status checker...");
+        this.startLiveStatusChecker();
+      }
+    } else {
+      console.log("[-] Stopping live status checker...");
+      this.stopLiveStatusChecker();
+    }
+  }
+
+  /**
+   * @returns true is returned if a streamer is currently in a channel.
+   */
+  private streamerIsPresent(): boolean {
+    return this.channels.size > 0;
   }
 
   /**
@@ -242,20 +338,35 @@ export class ChannelTracker {
   }
 
   /**
-   * Removes a member from a channel in the cache.
+   * Removes the given member from a channel in the cache and removes
+   * the channel from the cache if no more streamers are in
+   * that chanel.
    * @param channel The channel the user is to be removed from
-   * @param discordUserId The Discord user ID of the member who is being removed.
+   * @param discordUserId The Discord user ID of the member
+   * who is being removed.
    */
   private removeMemberFromChannel(
     channel: VoiceBasedChannel,
     discordUserId: string,
   ) {
+    // Get the channel information for the given channel
     const currentValue = this.channels.get(channel.id);
 
+    // Do we have channel information?
     if (currentValue != null) {
       currentValue.discordUserIds = currentValue.discordUserIds.filter(
         (userId) => userId !== discordUserId,
       );
+
+      // Is there still at least one user in the given channel
+      // after removing the given user?
+      if (currentValue.discordUserIds.length < 1) {
+        // Clearing channel status
+        this.clearChannelStatus(channel);
+
+        // Removing channel from cache
+        this.channels.delete(channel.id);
+      }
     }
   }
 
@@ -280,30 +391,26 @@ export class ChannelTracker {
    * Updates channel statuses to reflect any members that may be live streaming.
    */
   private async updateChannelStatuses() {
-    console.log("[-] Updating channel statuses...");
-    for (const [channelId, channelWithMembers] of this.channels) {
-      if (channelWithMembers.discordUserIds.length < 1) {
-        if (channelWithMembers.currentStatus == this.NOT_LIVE_STATUS) {
-          console.log("[-] Channel already has this status. Skipping...");
-        }
-        this.clearChannelStatus(channelWithMembers.channel);
-        this.channels.delete(channelId);
-      } else {
-        for (const discordUserId of channelWithMembers.discordUserIds) {
-          if (await this.isLive(discordUserId)) {
-            if (channelWithMembers.currentStatus == this.LIVE_STATUS) {
-              console.log("[-] Channel already has this status. Skipping...");
-            }
-            this.setChannelStatus(channelWithMembers.channel);
-          } else {
-            if (channelWithMembers.currentStatus == this.NOT_LIVE_STATUS) {
-              console.log("[-] Channel already has this status. Skipping...");
-            }
-            this.clearChannelStatus(channelWithMembers.channel);
+    console.log("[-] Checking if channel status needs updating...");
+    for (const channelInfo of this.channels.values()) {
+      for (const discordUserId of channelInfo.discordUserIds) {
+        if (await this.isLive(discordUserId)) {
+          if (channelInfo.currentStatus == this.LIVE_STATUS) {
+            console.log("[-] Channel already has this status. Skipping...");
+            continue;
           }
+          this.setChannelStatus(channelInfo.channel);
+        } else {
+          if (channelInfo.currentStatus == this.NOT_LIVE_STATUS) {
+            console.log("[-] Channel already has this status. Skipping...");
+            continue;
+          }
+          this.clearChannelStatus(channelInfo.channel);
         }
       }
     }
+
+    this.printChannelCache();
   }
 
   /**
@@ -367,6 +474,44 @@ export class ChannelTracker {
         `[-] Something went wrong when checking if this member was live... | ${error}`,
       );
       return false;
+    }
+  }
+
+  /**
+   * Prints out the channel cache in formatted human readable way.
+   */
+  private printChannelCache() {
+    if (this.channels.size < 1) {
+      console.log("[-] Channel cache is empty...");
+
+      return;
+    }
+
+    console.log("[-] Channel cache...");
+
+    let entry;
+    for (entry of this.channels);
+
+    for (const [channelId, channelInfo] of this.channels) {
+      if (channelId === entry?.[0]) {
+        console.log(
+          `[-] └─ ${channelInfo.channel.name} (${channelId}) [${channelInfo.currentStatus === this.LIVE_STATUS ? this.LIVE_STATUS : "Not Live"}]`,
+        );
+      } else {
+        console.log(
+          `[-] ├─ ${channelId} [${channelInfo.currentStatus === this.LIVE_STATUS ? this.LIVE_STATUS : "Not Live"}]`,
+        );
+      }
+
+      const streamers = channelInfo.discordUserIds;
+
+      for (const streamer of streamers) {
+        if (streamers.indexOf(streamer) === streamers.length - 1) {
+          console.log(`[-]    └─ ${streamer}`);
+        } else {
+          console.log(`[-] │  ├─ ${streamer}`);
+        }
+      }
     }
   }
 }
