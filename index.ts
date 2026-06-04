@@ -1,5 +1,5 @@
 import { Client, Events, GatewayIntentBits } from "discord.js";
-import { token, membersToCheck, intervalMs } from "./config.json";
+import { token, membersToCheck, intervalMs } from "./configs/config.json";
 import { ChannelTracker } from "./src/ChannelTracker";
 
 const client = new Client({
