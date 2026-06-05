@@ -1,4 +1,5 @@
 #ignoring build folder
+build
 
 # ignoring twitch config file
 twitchApiClientConfig.json
