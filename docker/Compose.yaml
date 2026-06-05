@@ -1,0 +1,4 @@
+services:
+  sliminator3000:
+    image: sliminator3000-image
+    restart: unless-stopped
