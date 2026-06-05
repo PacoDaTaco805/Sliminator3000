@@ -2,7 +2,12 @@ import { type Client, type VoiceBasedChannel } from "discord.js";
 import { VoiceState } from "discord.js";
 import { TwitchApiClient } from "./TwitchApiClient";
 
-type MemberInfo = {
+type DiscordMemberInfo = {
+  id: string;
+  username: string;
+};
+
+type StreamerInfo = {
   readonly discordUserId: string;
   readonly twitchUserId: string;
 };
@@ -15,7 +20,7 @@ type VoiceStateUpdateEvent = {
 type ChannelInfo = {
   channel: VoiceBasedChannel;
   currentStatus: string;
-  discordUserIds: string[];
+  discordMembers: DiscordMemberInfo[];
 };
 
 enum MemberAction {
@@ -24,6 +29,7 @@ enum MemberAction {
   REMAINED_IN_CHANNEL = "Remained",
   LEFT_CHANNEL = "Left",
 }
+
 /**
  * Tracks which channels have members that are currently live
  * streaming on twitch and marks their channel status accordingly.
@@ -41,10 +47,10 @@ export class ChannelTracker {
   private NOT_LIVE_STATUS = "";
 
   /**
-   * Holds the {@link MemberInfo} for all streamers to
+   * Holds the {@link StreamerInfo} for all streamers to
    * check the live status of.
    */
-  memberInfo: MemberInfo[];
+  memberInfo: StreamerInfo[];
 
   /**
    * The discord bot client that is using this {@link ChannelTracker}.
@@ -77,14 +83,14 @@ export class ChannelTracker {
   /**
    * Constructs an instance of {@link ChannelTracker}.
    * @param client The client of the discord bot this {@link ChannelTracker} is used by.
-   * @param memberInfo An array of {@link MemberInfo} informing this {@link ChannelTracker}
+   * @param memberInfo An array of {@link StreamerInfo} informing this {@link ChannelTracker}
    * of which members stream and should be tracked.
    * @param liveStatusCheckingInterval The interval at which to check twitch to see if any
    * of the given members are live.
    */
   constructor(
     client: Client,
-    memberInfo: MemberInfo[],
+    memberInfo: StreamerInfo[],
     liveStatusCheckingInterval: number,
   ) {
     this.client = client;
@@ -115,7 +121,10 @@ export class ChannelTracker {
           voiceBasedChannel.members
             .filter((member) => this.isStreamer(member.id))
             .forEach((liveMember) =>
-              this.addMemberToChannel(voiceBasedChannel, liveMember.id),
+              this.addMemberToChannel(voiceBasedChannel, {
+                id: liveMember.id,
+                username: liveMember.user.username,
+              }),
             ),
         ),
     );
@@ -168,15 +177,22 @@ export class ChannelTracker {
       return;
     }
 
-    const memberId = newState.member.id;
+    const discordMemberInfo = {
+      id: newState.member.id,
+      username: newState.member.user.username,
+    };
 
     // Is the member a streamer?
-    if (!this.isStreamer(memberId)) {
-      console.log(`[-] [${memberId}] is not a streamer. Skipping...`);
+    if (!this.isStreamer(discordMemberInfo.id)) {
+      console.log(
+        `[-] [${discordMemberInfo.username} (${discordMemberInfo.id})] is not a streamer. Skipping...`,
+      );
       return;
     }
 
-    console.log(`[-] [${memberId}] is a streamer. Processing action...`);
+    console.log(
+      `[-] [${discordMemberInfo.username} (${discordMemberInfo.id})] is a streamer. Processing action...`,
+    );
 
     const memberAction = this.getMemberAction(event);
 
@@ -184,15 +200,15 @@ export class ChannelTracker {
 
     switch (memberAction) {
       case MemberAction.JOINED_CHANNEL:
-        this.handleJoinedChannelAction(event, memberId);
+        this.handleJoinedChannelAction(event, discordMemberInfo);
         break;
 
       case MemberAction.SWITCHED_CHANNELS:
-        this.handleSwitchedChannelsAction(event, memberId);
+        this.handleSwitchedChannelsAction(event, discordMemberInfo);
         break;
 
       case MemberAction.LEFT_CHANNEL:
-        this.handleLeftChannelAction(event, memberId);
+        this.handleLeftChannelAction(event, discordMemberInfo);
         break;
 
       default:
@@ -212,12 +228,12 @@ export class ChannelTracker {
    */
   private handleJoinedChannelAction(
     event: VoiceStateUpdateEvent,
-    memberId: string,
+    discordMemberInfo: DiscordMemberInfo,
   ) {
     if (!event.newState.channel) {
       console.log("[-] Missing new state channel. Skipping...");
     } else {
-      this.addMemberToChannel(event.newState.channel, memberId);
+      this.addMemberToChannel(event.newState.channel, discordMemberInfo);
     }
   }
 
@@ -228,7 +244,7 @@ export class ChannelTracker {
    */
   private handleSwitchedChannelsAction(
     event: VoiceStateUpdateEvent,
-    memberId: string,
+    discordMemberInfo: DiscordMemberInfo,
   ) {
     const newState = event.newState;
     const oldState = event.oldState;
@@ -236,7 +252,11 @@ export class ChannelTracker {
     if (!oldState.channel || !newState.channel) {
       console.log("[-] Missing old or new state channel. Skipping...");
     } else {
-      this.switchMemberToChannel(oldState.channel, newState.channel, memberId);
+      this.switchMemberToChannel(
+        oldState.channel,
+        newState.channel,
+        discordMemberInfo,
+      );
     }
   }
 
@@ -247,12 +267,12 @@ export class ChannelTracker {
    */
   private handleLeftChannelAction(
     event: VoiceStateUpdateEvent,
-    memberId: string,
+    discordMemberInfo: DiscordMemberInfo,
   ) {
     if (!event.oldState.channel) {
       console.log("[-] Missing old state channel. Skipping...");
     } else {
-      this.removeMemberFromChannel(event.oldState.channel, memberId);
+      this.removeMemberFromChannel(event.oldState.channel, discordMemberInfo);
     }
   }
 
@@ -319,17 +339,17 @@ export class ChannelTracker {
    */
   private addMemberToChannel(
     channel: VoiceBasedChannel,
-    discordUserId: string,
+    discordMemberInfo: DiscordMemberInfo,
   ) {
     const currentValue = this.channels.get(channel.id);
 
     if (currentValue != null) {
-      currentValue.discordUserIds.push(discordUserId);
+      currentValue.discordMembers.push(discordMemberInfo);
     } else {
       this.channels.set(channel.id, {
         channel: channel,
         currentStatus: "",
-        discordUserIds: [discordUserId],
+        discordMembers: [discordMemberInfo],
       });
     }
   }
@@ -344,20 +364,20 @@ export class ChannelTracker {
    */
   private removeMemberFromChannel(
     channel: VoiceBasedChannel,
-    discordUserId: string,
+    discordMemberInfo: DiscordMemberInfo,
   ) {
     // Get the channel information for the given channel
     const currentValue = this.channels.get(channel.id);
 
     // Do we have channel information?
     if (currentValue != null) {
-      currentValue.discordUserIds = currentValue.discordUserIds.filter(
-        (userId) => userId !== discordUserId,
+      currentValue.discordMembers = currentValue.discordMembers.filter(
+        (currentMember) => currentMember.id !== discordMemberInfo.id,
       );
 
       // Is there still at least one user in the given channel
       // after removing the given user?
-      if (currentValue.discordUserIds.length < 1) {
+      if (currentValue.discordMembers.length < 1) {
         // Clearing channel status
         this.clearChannelStatus(channel);
 
@@ -377,11 +397,11 @@ export class ChannelTracker {
   private switchMemberToChannel(
     oldChannel: VoiceBasedChannel,
     newChannel: VoiceBasedChannel,
-    discordUserId: string,
+    discordMemberInfo: DiscordMemberInfo,
   ) {
-    this.addMemberToChannel(newChannel, discordUserId);
+    this.addMemberToChannel(newChannel, discordMemberInfo);
 
-    this.removeMemberFromChannel(oldChannel, discordUserId);
+    this.removeMemberFromChannel(oldChannel, discordMemberInfo);
   }
 
   /**
@@ -390,8 +410,8 @@ export class ChannelTracker {
   private async updateChannelStatuses() {
     console.log("[-] Checking if channel status needs updating...");
     for (const channelInfo of this.channels.values()) {
-      for (const discordUserId of channelInfo.discordUserIds) {
-        if (await this.isLive(discordUserId)) {
+      for (const discordMember of channelInfo.discordMembers) {
+        if (await this.isLive(discordMember.id)) {
           if (channelInfo.currentStatus == this.LIVE_STATUS) {
             console.log("[-] Channel already has this status. Skipping...");
             continue;
@@ -500,13 +520,13 @@ export class ChannelTracker {
         );
       }
 
-      const streamers = channelInfo.discordUserIds;
+      const streamers = channelInfo.discordMembers;
 
       for (const streamer of streamers) {
         if (streamers.indexOf(streamer) === streamers.length - 1) {
-          console.log(`[-]    └─ ${streamer}`);
+          console.log(`[-]    └─ ${streamer.username} (${streamer.id})`);
         } else {
-          console.log(`[-] │  ├─ ${streamer}`);
+          console.log(`[-] │  ├─ ${streamer.username} (${streamer.id})`);
         }
       }
     }
